@@ -1,10 +1,10 @@
 # distributed-semaphore
 
-A Redis clone built in Rust, with a custom two-level expiry system and ZSet implementation designed for distributed semaphore use cases.
+A custom in-memory store built in Rust with a two-level expiry system and ZSet implementation designed for distributed semaphore use cases. Uses the RESP protocol so it works with any Redis client, but the data model is our own.
 
 ## What it is
 
-A from-scratch Redis-compatible server implementing the RESP protocol over TCP. The core idea: multiple app servers can coordinate shared state through a single in-memory store — the classic distributed systems problem that Redis solves cheaply.
+An in-memory store that mimics Redis's wire protocol over TCP. The core idea: multiple app servers can coordinate shared state through a single store — the classic distributed systems problem Redis solves cheaply, but with per-element expiry that Redis doesn't support.
 
 ## Architecture
 
@@ -125,6 +125,14 @@ Connect with any Redis client:
 redis-cli -p 6379
 ```
 
-## Status
+## Running
 
-Work in progress — test scripts for the distributed semaphore coming next.
+```bash
+cargo run
+```
+
+Run the semaphore test:
+
+```bash
+./test_semaphore.sh
+```
