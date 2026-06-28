@@ -1,11 +1,7 @@
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use crate::resp::RespValue;
-use crate::store::{RedisValue, Store, ZSetEntry};
-
-fn sweep(map: &mut HashMap<String, ZSetEntry>) {
-    map.retain(|_, entry| !entry.is_expired());
-}
+use crate::store::{Element, RedisValue, Store};
 
 // ZADD key score member [EX seconds]
 pub fn zadd(args: &[String], store: &mut Store) -> RespValue {
@@ -33,10 +29,9 @@ pub fn zadd(args: &[String], store: &mut Store) -> RespValue {
 
     match store.get_mut(&key) {
         Some(RedisValue::ZSet(map)) => {
-            sweep(map);
+            map.retain(|_, e| !e.is_expired());
             let is_new = !map.contains_key(&member);
-            let expires_at = ttl.map(|d| Instant::now() + d);
-            map.insert(member, ZSetEntry { score, expires_at });
+            map.insert(member, Element::new(RedisValue::String(score.to_string()), ttl));
             RespValue::Integer(if is_new { 1 } else { 0 })
         }
         Some(_) => RespValue::Error("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
@@ -44,14 +39,14 @@ pub fn zadd(args: &[String], store: &mut Store) -> RespValue {
     }
 }
 
-// ZREM key member
+// ZREM key member [member ...]
 pub fn zrem(args: &[String], store: &mut Store) -> RespValue {
     if args.len() < 3 {
         return RespValue::Error("ERR wrong number of arguments for 'zrem'".to_string());
     }
     match store.get_mut(&args[1]) {
         Some(RedisValue::ZSet(map)) => {
-            sweep(map);
+            map.retain(|_, e| !e.is_expired());
             let count = args[2..].iter().filter(|m| map.remove(*m).is_some()).count();
             RespValue::Integer(count as i64)
         }
@@ -67,7 +62,7 @@ pub fn zcard(args: &[String], store: &mut Store) -> RespValue {
     }
     match store.get_mut(&args[1]) {
         Some(RedisValue::ZSet(map)) => {
-            sweep(map);
+            map.retain(|_, e| !e.is_expired());
             RespValue::Integer(map.len() as i64)
         }
         Some(_) => RespValue::Error("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
@@ -82,9 +77,12 @@ pub fn zscore(args: &[String], store: &mut Store) -> RespValue {
     }
     match store.get_mut(&args[1]) {
         Some(RedisValue::ZSet(map)) => {
-            sweep(map);
+            map.retain(|_, e| !e.is_expired());
             match map.get(&args[2]) {
-                Some(entry) => RespValue::BulkString(Some(entry.score.to_string())),
+                Some(el) => match el.value.as_ref() {
+                    RedisValue::String(s) => RespValue::BulkString(Some(s.clone())),
+                    _ => RespValue::BulkString(None),
+                },
                 None => RespValue::BulkString(None),
             }
         }
@@ -108,11 +106,16 @@ pub fn zremrangebyscore(args: &[String], store: &mut Store) -> RespValue {
     };
     match store.get_mut(&args[1]) {
         Some(RedisValue::ZSet(map)) => {
-            sweep(map);
+            map.retain(|_, e| !e.is_expired());
             let before = map.len();
-            map.retain(|_, entry| entry.score < min || entry.score > max);
-            let removed = before - map.len();
-            RespValue::Integer(removed as i64)
+            map.retain(|_, el| match el.value.as_ref() {
+                RedisValue::String(s) => {
+                    let score: f64 = s.parse().unwrap_or(0.0);
+                    score < min || score > max
+                }
+                _ => true,
+            });
+            RespValue::Integer((before - map.len()) as i64)
         }
         Some(_) => RespValue::Error("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
         None => RespValue::Integer(0),
@@ -134,9 +137,12 @@ pub fn zrange(args: &[String], store: &mut Store) -> RespValue {
     };
     match store.get_mut(&args[1]) {
         Some(RedisValue::ZSet(map)) => {
-            sweep(map);
+            map.retain(|_, e| !e.is_expired());
             let mut members: Vec<(&String, f64)> = map.iter()
-                .map(|(k, v)| (k, v.score))
+                .filter_map(|(k, el)| match el.value.as_ref() {
+                    RedisValue::String(s) => s.parse::<f64>().ok().map(|score| (k, score)),
+                    _ => None,
+                })
                 .collect();
             members.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
 

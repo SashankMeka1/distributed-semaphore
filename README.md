@@ -1,6 +1,6 @@
 # distributed-semaphore
 
-A Redis clone built in Rust, with a custom ZSet implementation designed for distributed semaphore use cases.
+A Redis clone built in Rust, with a custom two-level expiry system and ZSet implementation designed for distributed semaphore use cases.
 
 ## What it is
 
@@ -26,42 +26,92 @@ Client (redis-cli / any Redis client)
 └─────────────────────────────────┘
 ```
 
+## Two-Level Expiry System
+
+Unlike standard Redis which only supports key-level TTLs, this implementation has two independent expiry clocks:
+
+```
+Store
+└── HashMap<String, Entry>              ← Level 1: top-level key expiry
+        Entry {
+            value: RedisValue,
+            expires_at: Option<Instant>
+        }
+
+RedisValue {
+    String(String)
+    List(VecDeque<Element>)
+    Hash(HashMap<String, Element>)      ← Level 2: per-element expiry
+    Set(HashMap<String, Element>)
+    ZSet(HashMap<String, Element>)
+}
+        Element {
+            value: Box<RedisValue>,
+            expires_at: Option<Instant>
+        }
+```
+
+- **Level 1** — the whole key expires, taking all elements with it (cascade)
+- **Level 2** — individual elements inside a collection expire independently
+
+The background sweeper runs both levels every second. Collections also sweep lazily on every access.
+
 ## Supported Commands
 
 **Server**
-- `PING`, `ECHO`, `FLUSHALL`, `DBSIZE`
+- `PING [message]`, `ECHO message`, `FLUSHALL`, `DBSIZE`
 
 **Strings**
-- `GET`, `SET [EX seconds] [PX ms]`, `DEL`, `EXISTS`, `INCR`, `EXPIRE`, `TTL`
+- `GET key`
+- `SET key value [EX seconds] [PX milliseconds]`
+- `DEL key [key ...]`
+- `EXISTS key [key ...]`
+- `INCR key`
+- `EXPIRE key seconds`
+- `TTL key`
 
 **Lists**
-- `LPUSH`, `RPUSH`, `LPOP`, `RPOP`, `LRANGE`
+- `LPUSH key value [value ...]`
+- `RPUSH key value [value ...]`
+- `LPOP key`
+- `RPOP key`
+- `LRANGE key start stop`
 
 **Hashes**
-- `HSET`, `HGET`, `HDEL`, `HGETALL`
+- `HSET key field value [field value ...]`
+- `HGET key field`
+- `HDEL key field [field ...]`
+- `HGETALL key`
 
 **Sets**
-- `SADD`, `SREM`, `SMEMBERS`, `SISMEMBER`
+- `SADD key member [member ...]`
+- `SREM key member [member ...]`
+- `SMEMBERS key`
+- `SISMEMBER key member`
 
-**Sorted Sets (ZSet)**
-- `ZADD key score member [EX seconds]`
-- `ZREM`, `ZCARD`, `ZSCORE`, `ZRANGE`, `ZREMRANGEBYSCORE`
+**Sorted Sets (ZSet) — Custom**
+- `ZADD key score member [EX seconds]` — add member with score and optional per-member TTL
+- `ZREM key member [member ...]`
+- `ZCARD key` — count of non-expired members
+- `ZSCORE key member`
+- `ZRANGE key start stop`
+- `ZREMRANGEBYSCORE key min max`
 
-## Distributed Semaphore
+## Distributed Semaphore Pattern
 
-The ZSet implementation has per-member expiry independent of the score. This makes it well suited for a distributed semaphore pattern:
+The ZSet per-member expiry makes it well suited for a distributed semaphore. Each member is a client ID, its score is arbitrary, and its TTL is the lock timeout. If a client crashes without releasing, its entry expires automatically on the next acquire.
 
 ```
-# acquire: sweep expired holders, check count, add yourself
-ZREMRANGEBYSCORE semaphore 0 <now>
-ZCARD semaphore               # if below max, proceed
-ZADD semaphore <score> <client_id> EX 30
+# acquire
+ZREMRANGEBYSCORE semaphore 0 <now>   # sweep expired holders
+ZCARD semaphore                       # check current holder count
+ZADD semaphore 1.0 <client_id> EX 30 # claim a slot, expires in 30s
 
 # release
 ZREM semaphore <client_id>
 ```
 
-Expired holders are swept on every ZSet operation — no background cleanup needed. A crashed client's lock expires automatically.
+Multiple app servers all talking to the same instance coordinate without any additional infrastructure.
 
 ## Running
 
@@ -69,7 +119,7 @@ Expired holders are swept on every ZSet operation — no background cleanup need
 cargo run
 ```
 
-Then connect with any Redis client:
+Connect with any Redis client:
 
 ```bash
 redis-cli -p 6379
@@ -77,4 +127,4 @@ redis-cli -p 6379
 
 ## Status
 
-Work in progress — TCP listener and expiry worker not yet wired up.
+Work in progress — test scripts for the distributed semaphore coming next.

@@ -1,12 +1,19 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
-pub struct ZSetEntry {
-    pub score: f64,
+pub struct Element {
+    pub value: Box<RedisValue>,
     pub expires_at: Option<Instant>,
 }
 
-impl ZSetEntry {
+impl Element {
+    pub fn new(value: RedisValue, ttl: Option<Duration>) -> Self {
+        Self {
+            value: Box::new(value),
+            expires_at: ttl.map(|d| Instant::now() + d),
+        }
+    }
+
     pub fn is_expired(&self) -> bool {
         self.expires_at.map_or(false, |t| Instant::now() >= t)
     }
@@ -14,19 +21,32 @@ impl ZSetEntry {
 
 pub enum RedisValue {
     String(String),
-    List(VecDeque<String>),
-    Hash(HashMap<String, String>),
-    Set(HashSet<String>),
-    ZSet(HashMap<String, ZSetEntry>),
+    List(VecDeque<Element>),
+    Hash(HashMap<String, Element>),
+    Set(HashMap<String, Element>),
+    ZSet(HashMap<String, Element>), // Element.value = String(score)
 }
 
-struct Entry {
-    value: RedisValue,
-    expires_at: Option<Instant>,
+impl RedisValue {
+    // Sweep expired elements inside a collection
+    pub fn sweep(&mut self) {
+        match self {
+            RedisValue::List(deque) => deque.retain(|e| !e.is_expired()),
+            RedisValue::Hash(map) => map.retain(|_, e| !e.is_expired()),
+            RedisValue::Set(map) => map.retain(|_, e| !e.is_expired()),
+            RedisValue::ZSet(map) => map.retain(|_, e| !e.is_expired()),
+            RedisValue::String(_) => {}
+        }
+    }
+}
+
+pub struct Entry {
+    pub value: RedisValue,
+    pub expires_at: Option<Instant>,
 }
 
 impl Entry {
-    fn is_expired(&self) -> bool {
+    pub fn is_expired(&self) -> bool {
         self.expires_at.map_or(false, |t| Instant::now() >= t)
     }
 }
@@ -108,8 +128,12 @@ impl Store {
         self.data.len()
     }
 
-    /// Sweep expired keys — called by background task
+    // Level 1: sweep expired top-level keys
+    // Level 2: sweep expired elements inside surviving collections
     pub fn evict_expired(&mut self) {
         self.data.retain(|_, entry| !entry.is_expired());
+        for entry in self.data.values_mut() {
+            entry.value.sweep();
+        }
     }
 }

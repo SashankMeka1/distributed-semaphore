@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use crate::resp::RespValue;
-use crate::store::{RedisValue, Store};
+use crate::store::{Element, RedisValue, Store};
 
 pub fn hset(args: &[String], store: &mut Store) -> RespValue {
     if args.len() < 4 || args.len() % 2 != 0 {
@@ -14,9 +14,9 @@ pub fn hset(args: &[String], store: &mut Store) -> RespValue {
         Some(RedisValue::Hash(map)) => {
             let mut count = 0;
             for pair in args[2..].chunks(2) {
-                let inserted = !map.contains_key(&pair[0]);
-                map.insert(pair[0].clone(), pair[1].clone());
-                if inserted { count += 1; }
+                let is_new = !map.contains_key(&pair[0]);
+                map.insert(pair[0].clone(), Element::new(RedisValue::String(pair[1].clone()), None));
+                if is_new { count += 1; }
             }
             RespValue::Integer(count)
         }
@@ -31,8 +31,11 @@ pub fn hget(args: &[String], store: &mut Store) -> RespValue {
     }
     match store.get(&args[1]) {
         Some(RedisValue::Hash(map)) => match map.get(&args[2]) {
-            Some(val) => RespValue::BulkString(Some(val.clone())),
-            None => RespValue::BulkString(None),
+            Some(el) if !el.is_expired() => match el.value.as_ref() {
+                RedisValue::String(s) => RespValue::BulkString(Some(s.clone())),
+                _ => RespValue::BulkString(None),
+            },
+            _ => RespValue::BulkString(None),
         },
         Some(_) => RespValue::Error("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
         None => RespValue::BulkString(None),
@@ -61,11 +64,13 @@ pub fn hgetall(args: &[String], store: &mut Store) -> RespValue {
         Some(RedisValue::Hash(map)) => {
             let items: Vec<RespValue> = map
                 .iter()
-                .flat_map(|(k, v)| {
-                    vec![
+                .filter(|(_, el)| !el.is_expired())
+                .flat_map(|(k, el)| match el.value.as_ref() {
+                    RedisValue::String(v) => vec![
                         RespValue::BulkString(Some(k.clone())),
                         RespValue::BulkString(Some(v.clone())),
-                    ]
+                    ],
+                    _ => vec![],
                 })
                 .collect();
             RespValue::Array(Some(items))

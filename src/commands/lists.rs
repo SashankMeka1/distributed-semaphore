@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use crate::resp::RespValue;
-use crate::store::{RedisValue, Store};
+use crate::store::{Element, RedisValue, Store};
 
 pub fn lpush(args: &[String], store: &mut Store) -> RespValue {
     if args.len() < 3 {
@@ -13,7 +13,7 @@ pub fn lpush(args: &[String], store: &mut Store) -> RespValue {
     match store.get_mut(&key) {
         Some(RedisValue::List(list)) => {
             for val in args[2..].iter().rev() {
-                list.push_front(val.clone());
+                list.push_front(Element::new(RedisValue::String(val.clone()), None));
             }
             RespValue::Integer(list.len() as i64)
         }
@@ -33,7 +33,7 @@ pub fn rpush(args: &[String], store: &mut Store) -> RespValue {
     match store.get_mut(&key) {
         Some(RedisValue::List(list)) => {
             for val in &args[2..] {
-                list.push_back(val.clone());
+                list.push_back(Element::new(RedisValue::String(val.clone()), None));
             }
             RespValue::Integer(list.len() as i64)
         }
@@ -47,10 +47,16 @@ pub fn lpop(args: &[String], store: &mut Store) -> RespValue {
         return RespValue::Error("ERR wrong number of arguments for 'lpop'".to_string());
     }
     match store.get_mut(&args[1]) {
-        Some(RedisValue::List(list)) => match list.pop_front() {
-            Some(val) => RespValue::BulkString(Some(val)),
-            None => RespValue::BulkString(None),
-        },
+        Some(RedisValue::List(list)) => {
+            list.retain(|e| !e.is_expired());
+            match list.pop_front() {
+                Some(el) => match *el.value {
+                    RedisValue::String(s) => RespValue::BulkString(Some(s)),
+                    _ => RespValue::BulkString(None),
+                },
+                None => RespValue::BulkString(None),
+            }
+        }
         Some(_) => RespValue::Error("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
         None => RespValue::BulkString(None),
     }
@@ -61,10 +67,16 @@ pub fn rpop(args: &[String], store: &mut Store) -> RespValue {
         return RespValue::Error("ERR wrong number of arguments for 'rpop'".to_string());
     }
     match store.get_mut(&args[1]) {
-        Some(RedisValue::List(list)) => match list.pop_back() {
-            Some(val) => RespValue::BulkString(Some(val)),
-            None => RespValue::BulkString(None),
-        },
+        Some(RedisValue::List(list)) => {
+            list.retain(|e| !e.is_expired());
+            match list.pop_back() {
+                Some(el) => match *el.value {
+                    RedisValue::String(s) => RespValue::BulkString(Some(s)),
+                    _ => RespValue::BulkString(None),
+                },
+                None => RespValue::BulkString(None),
+            }
+        }
         Some(_) => RespValue::Error("WRONGTYPE Operation against a key holding the wrong kind of value".to_string()),
         None => RespValue::BulkString(None),
     }
@@ -82,8 +94,9 @@ pub fn lrange(args: &[String], store: &mut Store) -> RespValue {
         Ok(n) => n,
         Err(_) => return RespValue::Error("ERR value is not an integer or out of range".to_string()),
     };
-    match store.get(&args[1]) {
+    match store.get_mut(&args[1]) {
         Some(RedisValue::List(list)) => {
+            list.retain(|e| !e.is_expired());
             let len = list.len() as i64;
             let start = if start < 0 { (len + start).max(0) } else { start.min(len) } as usize;
             let stop = if stop < 0 { (len + stop).max(-1) } else { stop.min(len - 1) } as usize;
@@ -94,7 +107,10 @@ pub fn lrange(args: &[String], store: &mut Store) -> RespValue {
                 .iter()
                 .skip(start)
                 .take(stop - start + 1)
-                .map(|s| RespValue::BulkString(Some(s.clone())))
+                .filter_map(|el| match el.value.as_ref() {
+                    RedisValue::String(s) => Some(RespValue::BulkString(Some(s.clone()))),
+                    _ => None,
+                })
                 .collect();
             RespValue::Array(Some(items))
         }
